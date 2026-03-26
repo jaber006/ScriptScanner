@@ -1,0 +1,33 @@
+<!-- Open this in a browser to download icons. Or just use the SVG favicon. -->
+<canvas id="c192" width="192" height="192"></canvas>
+<canvas id="c512" width="512" height="512"></canvas>
+<script>
+function draw(canvas) {
+  const ctx = canvas.getContext('2d');
+  const s = canvas.width;
+  // Background
+  ctx.fillStyle = '#2563eb';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, s, s, s * 0.2);
+  ctx.fill();
+  // Pill icon
+  ctx.font = `${s * 0.5}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('💊', s/2, s*0.45);
+  // Text
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${s * 0.12}px sans-serif`;
+  ctx.fillText('SCAN', s/2, s*0.8);
+}
+draw(document.getElementById('c192'));
+draw(document.getElementById('c512'));
+// Auto-download
+['c192','c512'].forEach(id => {
+  const c = document.getElementById(id);
+  const a = document.createElement('a');
+  a.download = `icon-${c.width}.png`;
+  a.href = c.toDataURL('image/png');
+  a.click();
+});
+</script>
