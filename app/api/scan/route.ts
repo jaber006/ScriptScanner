@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { supabase } from '@/app/lib/supabase';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const PHARMACY_ID = process.env.PHARMACY_ID || 'legana-dds';
 
 const SYSTEM_PROMPT = `You are a dispense technician working in an Australian pharmacy. Your job is simple: accurately read the prescription and enter it into the dispensing system. You don't do clinical checks — the pharmacist reviews everything after you.
 
@@ -184,6 +186,18 @@ export async function POST(req: NextRequest) {
       selected: true,
       defer: false,
     }));
+
+    // Save to scan history (non-blocking)
+    supabase
+      .from('scan_history')
+      .insert({
+        pharmacy_id: PHARMACY_ID,
+        extracted_data: { ...parsed, items },
+        raw_ai_response: text,
+      })
+      .then(({ error: histError }) => {
+        if (histError) console.error('Failed to save scan history:', histError);
+      });
 
     return NextResponse.json({
       ...parsed,
