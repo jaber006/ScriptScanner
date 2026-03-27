@@ -137,6 +137,7 @@ export default function Home() {
           },
           doctor: {
             name: scriptData.doctorName,
+            searchName: (scriptData as Record<string, string>).doctorSearchName || '',
             prescriberNumber: scriptData.prescriberNumber,
           },
           scriptType: scriptData.scriptType,

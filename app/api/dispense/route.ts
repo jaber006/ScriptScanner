@@ -1,24 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
 /**
- * Dispense API — receives selected items from the phone app.
- * 
- * Phase 1 (MVP): Just logs and returns success.
- * Phase 2: Will forward to a WebSocket server running on the dispensary PC
- *          that injects keystrokes into Z Dispense.
- * 
- * Z Dispense field order (Barney layout):
- * 1. Patient — "LastName FirstName" → Enter → Select
- * 2. Supply Type — N(PBS), P(Private), R(RPBS), etc.
- * 3. Script Date
- * 4. Doctor — name → Select
- * 5. Drug — search term → Select
- * 6. Directions — sig text (or 'S' for standard)
- * 7. Repeats — number (add 'D' to defer)
- * 8. Quantity
- * 9. Price — skip (auto)
- * 10. Pharmacist Initials
- * 11. F10 — Finish
+ * Dispense API — receives selected items from the phone app,
+ * builds keystroke sequences for Z Dispense, and writes to Supabase
+ * for the PC agent to pick up.
+ *
+ * Z Dispense BARNEY layout field order:
+ * 1. Patient name → Enter (search) → Enter (select first match)
+ * 2. Tab → Supply Type code (N/P/R/etc.)
+ * 3. Tab → Script Date DD/MM/YYYY
+ * 4. Tab → Doctor surname → Enter (search) → Enter (select)
+ * 5. Tab → Drug search → Enter (search) → Enter (select)
+ * 6. Tab → Directions (full expanded text)
+ * 7. Tab → Repeats number
+ * 8. Tab → Quantity number
+ * 9. Tab → Price (skip, auto-calculated)
+ * 10. Tab → Pharmacist Initials
+ * 11. F10 → Finish & print label
  */
 
 // Script type mapping to Z Dispense codes
@@ -27,8 +26,7 @@ const SCRIPT_TYPE_MAP: Record<string, string> = {
   'GENERAL': 'N',
   'PRIVATE': 'P',
   'RPBS': 'R',
-  'REPAT': 'R',
-  'DVA': 'R',
+  'REPAT': 'R',  'DVA': 'R',
   'DENTAL': 'D',
   'OPTOMETRICAL': 'E',
   'NURSE': 'U',
@@ -41,11 +39,13 @@ const SCRIPT_TYPE_MAP: Record<string, string> = {
 
 interface DispenseItem {
   drugName: string;
+  drugSearchName?: string;
   strength: string;
   form: string;
   quantity: string;
   repeats: string;
   directions: string;
+  directionsRaw?: string;
   defer: boolean;
 }
 
@@ -58,6 +58,7 @@ interface DispensePayload {
   };
   doctor: {
     name: string;
+    searchName?: string;
     prescriberNumber: string;
   };
   scriptType: string;
@@ -65,57 +66,84 @@ interface DispensePayload {
   items: DispenseItem[];
   deferredItems: DispenseItem[];
 }
-
 export async function POST(req: NextRequest) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    return NextResponse.json({ error: 'Supabase not configured' }, { status: 500 });
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseKey);
+
   try {
     const payload: DispensePayload = await req.json();
 
     // Build Z Dispense keystroke sequence for each item
     const typeCode = SCRIPT_TYPE_MAP[payload.scriptType?.toUpperCase()] || 'N';
-    
-    const keystrokes = [];
+    const allItems = [...payload.items, ...payload.deferredItems];
 
-    for (const item of [...payload.items, ...payload.deferredItems]) {
-      // Build drug search term: "name form strength"
-      const drugSearch = [item.drugName, item.form, item.strength]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
+    // Doctor search name: use searchName field or extract surname
+    const doctorSearch = payload.doctor.searchName
+      || payload.doctor.name.replace(/^(Dr\.?\s*)/i, '').split(' ').pop()?.toUpperCase()
+      || payload.doctor.name;
 
-      const repeatsField = item.defer 
-        ? `${item.repeats || '0'}D` 
+    const keystrokes = allItems.map((item) => {
+      const drugSearch = item.drugSearchName
+        || item.drugName.replace(/\s*\(.*\)/, '').toUpperCase();
+
+      const repeatsField = item.defer
+        ? `${item.repeats || '0'}D`
         : (item.repeats || '0');
-
-      keystrokes.push({
+      return {
         patient: payload.patient.name,
-        supplyType: typeCode + (item.defer ? '' : ''),  // Add 'O' for owing, 'A' for authority
+        supplyType: typeCode,
         scriptDate: payload.scriptDate,
-        doctor: payload.doctor.name,
+        doctor: doctorSearch,
         drug: drugSearch,
-        directions: item.directions || 'S',
+        directions: item.directions || 'As directed by your doctor',
         repeats: repeatsField,
-        quantity: item.quantity,
+        quantity: item.quantity || '',
         defer: item.defer,
-      });
-    }
-
-    // Phase 1: Log the keystroke sequence
-    console.log('=== DISPENSE REQUEST ===');
-    console.log('Patient:', payload.patient.name);
-    console.log('Doctor:', payload.doctor.name);
-    console.log('Script Type:', payload.scriptType, '→ Z Code:', typeCode);
-    console.log('Items:', keystrokes.length);
-    keystrokes.forEach((ks, i) => {
-      console.log(`  Item ${i + 1}:`, ks.drug, ks.defer ? '(DEFER)' : '');
+      };
     });
 
-    // Phase 2: TODO — Send to WebSocket server on dispensary PC
-    // ws.send(JSON.stringify({ action: 'dispense', keystrokes }));
+    // Write to Supabase script_queue
+    const { data, error } = await supabase
+      .from('script_queue')
+      .insert({
+        patient_name: payload.patient.name,
+        patient_dob: payload.patient.dob || null,
+        patient_address: payload.patient.address || null,
+        medicare_number: payload.patient.medicare || null,
+        doctor_name: payload.doctor.name,
+        prescriber_number: payload.doctor.prescriberNumber || null,
+        script_type: typeCode,
+        script_date: payload.scriptDate || null,
+        items: allItems,
+        keystrokes: keystrokes,
+        status: 'pending',
+      })
+      .select()
+      .single();
+    if (error) {
+      console.error('Supabase insert error:', error);
+      return NextResponse.json({ error: `Database error: ${error.message}` }, { status: 500 });
+    }
+
+    console.log('=== SCRIPT QUEUED ===');
+    console.log('ID:', data.id);
+    console.log('Patient:', payload.patient.name);
+    console.log('Doctor search:', doctorSearch);
+    console.log('Items:', allItems.length);
+    allItems.forEach((item, i) => {
+      console.log(`  Item ${i + 1}: ${item.drugSearchName || item.drugName} — "${item.directions}"`);
+    });
 
     return NextResponse.json({
       success: true,
       message: `Queued ${payload.items.length} items for dispensing, ${payload.deferredItems.length} deferred`,
-      keystrokes, // Return for debugging
+      queueId: data.id,
     });
   } catch (err: unknown) {
     console.error('Dispense error:', err);

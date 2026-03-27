@@ -1,0 +1,7 @@
+pyautogui==0.9.54
+pyperclip==1.9.0
+flask==3.1.0
+flask-cors==5.0.1
+pygetwindow==0.0.9
+supabase>=2.0.0
+python-dotenv>=1.0.0
