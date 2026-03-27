@@ -1,25 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { supabase } from '@/app/lib/supabase';
 
 /**
  * Dispense API — receives selected items from the phone app.
- * 
- * Phase 1 (MVP): Just logs and returns success.
- * Phase 2: Will forward to a WebSocket server running on the dispensary PC
- *          that injects keystrokes into Z Dispense.
- * 
- * Z Dispense field order (Barney layout):
- * 1. Patient — "LastName FirstName" → Enter → Select
- * 2. Supply Type — N(PBS), P(Private), R(RPBS), etc.
- * 3. Script Date
- * 4. Doctor — name → Select
- * 5. Drug — search term → Select
- * 6. Directions — sig text (or 'S' for standard)
- * 7. Repeats — number (add 'D' to defer)
- * 8. Quantity
- * 9. Price — skip (auto)
- * 10. Pharmacist Initials
- * 11. F10 — Finish
+ * Writes a dispense job to Supabase. The dispensary PC agent polls
+ * for pending jobs and injects keystrokes into Z Dispense.
+ *
+ * Flow: Phone → Vercel API → Supabase → Dispensary Agent → Z Dispense
  */
+
+const PHARMACY_ID = process.env.PHARMACY_ID || 'legana-dds';
 
 // Script type mapping to Z Dispense codes
 const SCRIPT_TYPE_MAP: Record<string, string> = {
@@ -70,52 +60,74 @@ export async function POST(req: NextRequest) {
   try {
     const payload: DispensePayload = await req.json();
 
-    // Build Z Dispense keystroke sequence for each item
-    const typeCode = SCRIPT_TYPE_MAP[payload.scriptType?.toUpperCase()] || 'N';
-    
-    const keystrokes = [];
+    const selected = payload.items || [];
+    const deferred = payload.deferredItems || [];
 
-    for (const item of [...payload.items, ...payload.deferredItems]) {
-      // Build drug search term: "name form strength"
+    if (selected.length === 0 && deferred.length === 0) {
+      return NextResponse.json(
+        { error: 'No items to dispense' },
+        { status: 400 }
+      );
+    }
+
+    // Build Z Dispense keystroke preview
+    const typeCode = SCRIPT_TYPE_MAP[payload.scriptType?.toUpperCase()] || 'N';
+
+    const keystrokes = [...selected, ...deferred].map((item) => {
       const drugSearch = [item.drugName, item.form, item.strength]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
 
-      const repeatsField = item.defer 
-        ? `${item.repeats || '0'}D` 
-        : (item.repeats || '0');
-
-      keystrokes.push({
+      return {
         patient: payload.patient.name,
-        supplyType: typeCode + (item.defer ? '' : ''),  // Add 'O' for owing, 'A' for authority
+        supplyType: typeCode,
         scriptDate: payload.scriptDate,
         doctor: payload.doctor.name,
         drug: drugSearch,
         directions: item.directions || 'S',
-        repeats: repeatsField,
+        repeats: item.defer ? `${item.repeats || '0'}D` : (item.repeats || '0'),
         quantity: item.quantity,
         defer: item.defer,
-      });
-    }
-
-    // Phase 1: Log the keystroke sequence
-    console.log('=== DISPENSE REQUEST ===');
-    console.log('Patient:', payload.patient.name);
-    console.log('Doctor:', payload.doctor.name);
-    console.log('Script Type:', payload.scriptType, '→ Z Code:', typeCode);
-    console.log('Items:', keystrokes.length);
-    keystrokes.forEach((ks, i) => {
-      console.log(`  Item ${i + 1}:`, ks.drug, ks.defer ? '(DEFER)' : '');
+      };
     });
 
-    // Phase 2: TODO — Send to WebSocket server on dispensary PC
-    // ws.send(JSON.stringify({ action: 'dispense', keystrokes }));
+    // Write job to Supabase
+    const { data, error } = await supabase
+      .from('dispense_jobs')
+      .insert({
+        pharmacy_id: PHARMACY_ID,
+        status: 'pending',
+        payload: {
+          patient: payload.patient,
+          doctor: payload.doctor,
+          scriptType: payload.scriptType,
+          scriptDate: payload.scriptDate,
+          items: selected.map((i) => ({ ...i, defer: false })),
+          deferredItems: deferred.map((i) => ({ ...i, defer: true })),
+        },
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase error:', error);
+      return NextResponse.json(
+        { error: `Database error: ${error.message}` },
+        { status: 500 }
+      );
+    }
+
+    console.log('=== DISPENSE JOB CREATED ===');
+    console.log('Job ID:', data.id);
+    console.log('Patient:', payload.patient.name);
+    console.log('Items:', selected.length, 'Deferred:', deferred.length);
 
     return NextResponse.json({
       success: true,
-      message: `Queued ${payload.items.length} items for dispensing, ${payload.deferredItems.length} deferred`,
-      keystrokes, // Return for debugging
+      jobId: data.id,
+      message: `Queued ${selected.length} items for dispensing, ${deferred.length} deferred`,
+      keystrokes,
     });
   } catch (err: unknown) {
     console.error('Dispense error:', err);
