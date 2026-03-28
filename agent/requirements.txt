@@ -1,7 +1,29 @@
-pyautogui==0.9.54
-pyperclip==1.9.0
-flask==3.1.0
-flask-cors==5.0.1
-pygetwindow==0.0.9
-supabase>=2.0.0
-python-dotenv>=1.0.0
+# ScriptScanner Vision Agent — Python 3.12
+# Install: pip install -r requirements.txt
+
+# Claude Vision API
+anthropic>=0.25.0
+
+# Desktop automation
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+pygetwindow>=0.0.9
+
+# Image handling
+Pillow>=10.0.0
+
+# Perceptual hashing for learning cache (screen fingerprinting)
+imagehash>=4.3.1
+
+# Supabase (v1.x for Python 3.12 compat — v2 has breaking changes)
+supabase<2.0
+
+# HTTP server for health endpoint (optional)
+flask>=2.3.0
+flask-cors>=4.0.0
+
+# GUI launcher and system tray
+pystray>=0.19.0
+
+# Build tool (dev only — not needed at runtime)
+pyinstaller>=6.0.0
